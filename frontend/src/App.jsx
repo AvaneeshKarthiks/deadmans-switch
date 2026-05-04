@@ -187,6 +187,8 @@ function BackupPanel({ onClaim, txPending, account, contractAddress }) {
   const [checking,  setChecking]  = useState(false);
   const [lookupErr, setLookupErr] = useState("");
 
+  const reset = () => { setInfo(null); setLookupErr(""); setOwnerAddr(""); };
+
   const checkVault = async () => {
     if (!ownerAddr) return;
     setChecking(true);
@@ -197,24 +199,65 @@ function BackupPanel({ onClaim, txPending, account, contractAddress }) {
         setLookupErr("Set the contract address in the Settings tab first.");
         return;
       }
+
+      // Normalize both addresses to EIP-55 checksum form before passing to ethers v6.
+      // MetaMask address displays and Hardhat terminal output are lowercase — ethers v6
+      // throws 'bad address checksum' if you pass non-checksummed addresses to a
+      // Contract constructor or as call arguments.
+      let checksumContract, checksumOwner;
+      try {
+        checksumContract = ethers.getAddress(contractAddress);
+      } catch {
+        setLookupErr("The saved contract address is invalid. Update it in the Settings tab.");
+        return;
+      }
+      try {
+        checksumOwner = ethers.getAddress(ownerAddr);
+      } catch {
+        setLookupErr("That doesn't look like a valid Ethereum address. Check for typos.");
+        return;
+      }
+
       const provider = new ethers.BrowserProvider(window.ethereum);
       const signer   = await provider.getSigner();
       const abi = [
-        "function getVaultInfo(address) external view returns (address,address,uint256,uint256,uint256,bool,bool,uint256,uint256,bool)",
+        "function getVaultInfo(address _owner) external view returns (address owner, address backup, uint256 balance, uint256 lastPingTime, uint256 pingInterval, bool claimed, bool active, uint256 deadline, uint256 timeRemaining, bool isExpired)",
       ];
-      const c   = new ethers.Contract(contractAddress, abi, signer);
-      const raw = await c.getVaultInfo(ownerAddr);
+      const c   = new ethers.Contract(checksumContract, abi, signer);
+      const raw = await c.getVaultInfo(checksumOwner);
+      const active = raw[6];
+
+      // An address with no vault returns active=false with lastPingTime=0 and
+      // pingInterval=0. That makes block.timestamp > 0+0 always true, which
+      // would show isExpired=YES and Balance=0 for every non-existent vault.
+      if (!active) {
+        setLookupErr(
+          "No active vault found for that address. " +
+          "Make sure you entered the vault OWNER's address — not your own."
+        );
+        return;
+      }
+
       setInfo({
         backup:        raw[1],
         balance:       Number(raw[2]) / 1e18,
         pingInterval:  Number(raw[4]),
         claimed:       raw[5],
-        active:        raw[6],
+        active:        true,
         timeRemaining: Number(raw[8]),
         isExpired:     raw[9],
       });
     } catch (e) {
-      setLookupErr("No vault found at that address, or address is invalid.");
+      console.error("BackupPanel checkVault error:", e);
+      const msg = e?.reason ?? e?.shortMessage ?? e?.message ?? "";
+      if (msg.includes("could not decode result data")) {
+        setLookupErr(
+          "The contract at the saved address doesn't match. " +
+          "Re-run deploy and update the address in Settings."
+        );
+      } else {
+        setLookupErr("Lookup failed: " + msg.slice(0, 120));
+      }
     } finally {
       setChecking(false);
     }
@@ -223,75 +266,97 @@ function BackupPanel({ onClaim, txPending, account, contractAddress }) {
   const isMyBackup = info && info.backup?.toLowerCase() === account?.toLowerCase();
   const canClaim   = isMyBackup && info.isExpired && !info.claimed && info.active;
 
+  // ── lookup form ──────────────────────────────────────────────────────────
+  if (!info) {
+    return (
+      <div>
+
+        <div className="form-group">
+          <label className="form-label">Vault Owner's Wallet Address</label>
+          <div className="row">
+            <input
+              className="form-input"
+              placeholder="0x… the owner's wallet"
+              value={ownerAddr}
+              onChange={(e) => setOwnerAddr(e.target.value.trim())}
+              onKeyDown={(e) => e.key === "Enter" && checkVault()}
+            />
+            <button
+              className="btn btn-outline"
+              onClick={checkVault}
+              disabled={checking || !ownerAddr}
+              style={{ flexShrink: 0 }}
+            >
+              {checking ? <Spinner /> : "Look up"}
+            </button>
+          </div>
+        </div>
+
+        {lookupErr && <Alert type="danger">{lookupErr}</Alert>}
+      </div>
+    );
+  }
+
+  // ── vault result ─────────────────────────────────────────────────────────
   return (
     <div>
-      <div className="form-group">
-        <label className="form-label">Owner Vault Address</label>
-        <div className="row">
-          <input
-            className="form-input"
-            placeholder="0x… vault owner's wallet address"
-            value={ownerAddr}
-            onChange={(e) => setOwnerAddr(e.target.value.trim())}
-          />
-          <button
-            className="btn btn-outline"
-            onClick={checkVault}
-            disabled={checking || !ownerAddr}
-            style={{ flexShrink: 0 }}
-          >
-            {checking ? <Spinner /> : "Lookup"}
-          </button>
-        </div>
-        <div className="form-hint">Enter the vault owner's wallet to check its status.</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+        <button
+          className="btn btn-outline btn-sm"
+          onClick={reset}
+          style={{ fontSize: "0.78rem", padding: "4px 12px" }}
+        >
+          ← Back
+        </button>
+        <span style={{ color: "var(--text-muted)", fontSize: "0.8rem", fontFamily: "var(--mono)" }}>
+          Vault owned by {shorten(ownerAddr)}
+        </span>
       </div>
 
-      {lookupErr && <Alert type="danger">{lookupErr}</Alert>}
-
-      {info && (
-        <div className="card" style={{ marginTop: 0 }}>
-          <div className="stats-grid">
-            <div className="stat-chip">
-              <div className="stat-label">Balance</div>
-              <div className="stat-value accent">{info.balance.toFixed(4)} ETH</div>
-            </div>
-            <div className="stat-chip">
-              <div className="stat-label">Interval</div>
-              <div className="stat-value">{Math.floor(info.pingInterval / 86400)}d</div>
-            </div>
-            <div className="stat-chip">
-              <div className="stat-label">Expired?</div>
-              <div className={`stat-value ${info.isExpired ? "danger" : "success"}`}>
-                {info.isExpired ? "YES" : "NO"}
-              </div>
-            </div>
-            <div className="stat-chip">
-              <div className="stat-label">Your Role</div>
-              <div className={`stat-value ${isMyBackup ? "success" : "warn"}`}>
-                {isMyBackup ? "BACKUP ✓" : "NOT BACKUP"}
-              </div>
+      <div className="card" style={{ marginTop: 0 }}>
+        <div className="stats-grid">
+          <div className="stat-chip">
+            <div className="stat-label">Balance</div>
+            <div className="stat-value accent">{info.balance.toFixed(4)} ETH</div>
+          </div>
+          <div className="stat-chip">
+            <div className="stat-label">Interval</div>
+            <div className="stat-value">{Math.floor(info.pingInterval / 86400)}d</div>
+          </div>
+          <div className="stat-chip">
+            <div className="stat-label">Expired?</div>
+            <div className={`stat-value ${info.isExpired ? "danger" : "success"}`}>
+              {info.isExpired ? "YES" : "NO"}
             </div>
           </div>
-          {canClaim && (
-            <button className="btn btn-success" onClick={() => onClaim(ownerAddr)} disabled={txPending}>
-              {txPending ? <><Spinner /> Claiming…</> : "⚡  Claim Vault Funds"}
-            </button>
-          )}
-          {isMyBackup && !info.isExpired && (
-            <div className="alert alert-info">
-              Owner is still active. Claimable in {Math.floor(info.timeRemaining / 86400)}d {Math.floor((info.timeRemaining % 86400) / 3600)}h.
+          <div className="stat-chip">
+            <div className="stat-label">Your Role</div>
+            <div className={`stat-value ${isMyBackup ? "success" : "warn"}`}>
+              {isMyBackup ? "BACKUP ✓" : "NOT BACKUP"}
             </div>
-          )}
-          {isMyBackup && info.claimed && (
-            <div className="alert alert-warn">This vault has already been claimed.</div>
-          )}
-          {!isMyBackup && (
-            <div className="alert alert-warn">
-              Your wallet ({shorten(account)}) is not the backup for this vault.
-            </div>
-          )}
+          </div>
         </div>
-      )}
+
+        {canClaim && (
+          <button className="btn btn-success" onClick={() => onClaim(ownerAddr)} disabled={txPending}>
+            {txPending ? <><Spinner /> Claiming…</> : "⚡  Claim Vault Funds"}
+          </button>
+        )}
+        {isMyBackup && !info.isExpired && (
+          <div className="alert alert-info">
+            Owner is still active. Claimable in {Math.floor(info.timeRemaining / 86400)}d {Math.floor((info.timeRemaining % 86400) / 3600)}h.
+          </div>
+        )}
+        {isMyBackup && info.claimed && (
+          <div className="alert alert-warn">This vault has already been claimed.</div>
+        )}
+        {!isMyBackup && (
+          <div className="alert alert-warn">
+            Your connected wallet ({shorten(account)}) is not the backup for this vault —
+            you can view it but cannot claim it. Switch to the backup account to claim.
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -299,7 +364,11 @@ function BackupPanel({ onClaim, txPending, account, contractAddress }) {
 // ── SettingsPanel ─────────────────────────────────────────────────────────────
 
 function SettingsPanel({ contractAddress, setContractAddress, account, chainId }) {
+  // Keep local draft in sync with the prop so the field always reflects the
+  // current address even if it was changed from outside (deploy script, etc.).
   const [val, setVal] = useState(contractAddress);
+  useEffect(() => { setVal(contractAddress); }, [contractAddress]);
+
   const isHardhat = chainId === 31337;
   return (
     <div className="card">
@@ -413,10 +482,49 @@ function ConnectScreen({ onConnect, loading, error, clearMessages }) {
 
 export default function App() {
   const [contractAddress, setContractAddress] = useState(() => {
-    // Vite replaces window.__DEPLOYED_ADDRESS__ at build/dev start via
-    // the define plugin in vite.config.js (written by deploy.js).
-    try { return window.__DEPLOYED_ADDRESS__ ?? ""; } catch (_) { return ""; }
+    // Priority order for the initial contract address:
+    //   1. localStorage — set by the user manually via Settings (survives reloads)
+    //   2. window.__DEPLOYED_ADDRESS__ — injected by Vite from deploymentInfo.json
+    //      at dev-server startup. Goes stale after Hardhat restart + redeploy
+    //      until `npm run dev` is also restarted.
+    //   3. Empty string — shows the "Contract Not Configured" prompt.
+    //
+    // localStorage wins so that a manually-entered correct address is not
+    // silently overwritten by a stale injected value on the next page load.
+    try {
+      const fromStorage  = localStorage.getItem("dms_contract_address") ?? "";
+      const fromVite     = window.__DEPLOYED_ADDRESS__ ?? "";
+      const raw          = fromStorage || fromVite;
+      return raw ? ethers.getAddress(raw) : "";
+    } catch (_) { return ""; }
   });
+
+  /**
+   * Normalize the address to EIP-55 checksum form, persist it in localStorage
+   * so it survives page reloads, then update React state.
+   *
+   * ethers v6 throws "bad address checksum" for lowercase addresses, and both
+   * MetaMask address displays and Hardhat terminal output are lowercase.
+   * Centralizing normalization here means callers never have to think about it.
+   */
+  const safeSetContractAddress = (raw) => {
+    if (!raw || !raw.trim()) {
+      localStorage.removeItem("dms_contract_address");
+      setContractAddress("");
+      return;
+    }
+    try {
+      const checksummed = ethers.getAddress(raw.trim());
+      localStorage.setItem("dms_contract_address", checksummed);
+      setContractAddress(checksummed);
+    } catch {
+      // Address is not valid hex yet (user is mid-typing, or copied wrong value).
+      // Store as-is so the Settings input stays responsive while typing.
+      // useVault's contract creation effect will show a clear error once the
+      // user finishes and the invalid address reaches it.
+      setContractAddress(raw.trim());
+    }
+  };
 
   const [tab, setTab] = useState("owner");
 
@@ -424,7 +532,8 @@ export default function App() {
     account, chainId, vaultInfo,
     loading, txPending, error, successMsg,
     countdown, countdownStr, pct,
-    connectWallet, createVault, ping, withdraw, claim,
+    connectWallet, switchAccount, disconnect,
+    createVault, ping, withdraw, claim,
     clearMessages,
   } = useVault(contractAddress);
 
@@ -442,12 +551,30 @@ export default function App() {
           </div>
         </div>
         {account ? (
-          <div className="wallet-badge">
-            <div className="wallet-dot" />
-            <span>{shorten(account)}</span>
-            <span style={{ color: isHardhat ? "var(--success)" : "var(--warn)" }}>
-              {isHardhat ? "Hardhat" : `Chain ${chainId}`}
-            </span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div className="wallet-badge">
+              <div className="wallet-dot" />
+              <span>{shorten(account)}</span>
+              <span style={{ color: isHardhat ? "var(--success)" : "var(--warn)" }}>
+                {isHardhat ? "Hardhat" : `Chain ${chainId}`}
+              </span>
+            </div>
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={switchAccount}
+              title="Switch MetaMask account"
+              style={{ fontSize: "0.72rem", padding: "4px 10px" }}
+            >
+              Switch
+            </button>
+            <button
+              className="btn btn-outline btn-sm"
+              onClick={disconnect}
+              title="Disconnect wallet"
+              style={{ fontSize: "0.72rem", padding: "4px 10px", color: "var(--danger)" }}
+            >
+              Disconnect
+            </button>
           </div>
         ) : (
           <button
@@ -493,7 +620,7 @@ export default function App() {
                   <input
                     className="form-input"
                     placeholder="0x…"
-                    onBlur={(e) => setContractAddress(e.target.value.trim())}
+                    onBlur={(e) => safeSetContractAddress(e.target.value)}
                     defaultValue=""
                   />
                   <div className="form-hint">
@@ -573,7 +700,7 @@ export default function App() {
                 {tab === "settings" && (
                   <SettingsPanel
                     contractAddress={contractAddress}
-                    setContractAddress={setContractAddress}
+                    setContractAddress={safeSetContractAddress}
                     account={account}
                     chainId={chainId}
                   />

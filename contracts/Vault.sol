@@ -63,14 +63,14 @@ contract DeadMansVault {
     /**
      * @notice Create a new vault. Deposits msg.value ETH into the vault.
      * @param _backup           Address that can claim funds if owner goes inactive.
-     * @param _pingIntervalDays How many days the owner has between pings (1–365).
+     * @param _pingIntervalDays How many days the owner has between pings (1-365).
      */
     function createVault(address _backup, uint256 _pingIntervalDays) external payable {
         require(!vaults[msg.sender].active,                        "Vault already exists");
         require(_backup != address(0),                             "Invalid backup address");
         require(_backup != msg.sender,                             "Backup cannot be the owner");
         require(msg.value > 0,                                     "Must deposit ETH");
-        require(_pingIntervalDays >= 1 && _pingIntervalDays <= 365,"Interval must be 1–365 days");
+        require(_pingIntervalDays >= 1 && _pingIntervalDays <= 365,"Interval must be 1-365 days");
 
         uint256 interval = _pingIntervalDays * 1 days;
 

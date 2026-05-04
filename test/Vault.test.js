@@ -72,10 +72,10 @@ describe("DeadMansVault", function () {
       const { vault, owner, backup } = await deploy();
       await expect(
         vault.connect(owner).createVault(backup.address, 0, { value: ONE_ETH })
-      ).to.be.revertedWith("Interval must be 1–365 days");
+      ).to.be.revertedWith("Interval must be 1-365 days");
       await expect(
         vault.connect(owner).createVault(backup.address, 366, { value: ONE_ETH })
-      ).to.be.revertedWith("Interval must be 1–365 days");
+      ).to.be.revertedWith("Interval must be 1-365 days");
     });
   });
 
